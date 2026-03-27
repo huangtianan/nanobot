@@ -254,6 +254,57 @@ Connect nanobot to your favorite chat platform. Want to build your own? See the 
 | **QQ** | App ID + App Secret |
 | **Wecom** | Bot ID + Bot Secret |
 | **Mochat** | Claw token (auto-setup available) |
+| **Web (WebSocket)** | Browser/client connects to `ws://host:8765/ws` |
+
+<details>
+<summary><b>Web (WebSocket)</b></summary>
+
+Built-in channel for browser or backend clients using WebSocket.
+
+**1. Configure**
+
+```json
+{
+  "channels": {
+    "web": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 8765,
+      "path": "/ws",
+      "streaming": true,
+      "allowFrom": ["*"]
+    }
+  }
+}
+```
+
+Optional: set `"token": "your-secret"` and send an auth frame first:
+
+```json
+{"type":"auth","token":"your-secret","sender_id":"web-user","chat_id":"room-1"}
+```
+
+Then send user messages:
+
+```json
+{"type":"message","sender_id":"web-user","chat_id":"room-1","content":"Hello"}
+```
+
+Server push events include:
+- `type: "message"` (non-streaming full response)
+- `type: "stream_delta"` / `type: "stream_end"` (streaming response chunks)
+
+Minimal browser demo: [`docs/examples/web_minimal_client.html`](./docs/examples/web_minimal_client.html)
+
+> If you see `GET /favicon.ico 404` in `python -m http.server` logs, it is harmless and unrelated to websocket messaging.
+
+**2. Run**
+
+```bash
+nanobot gateway
+```
+
+</details>
 
 <details>
 <summary><b>Telegram</b> (Recommended)</summary>
