@@ -4,11 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>nanobot web channel demo</title>
+  <link rel="icon" href="data:,">
   <style>
     body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 20px; max-width: 900px; }
     .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
     input, button { padding: 8px; font-size: 14px; }
     input { flex: 1; min-width: 180px; }
+    #chat { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; min-height: 120px; margin-bottom: 10px; }
+    .msg { margin: 6px 0; line-height: 1.5; }
+    .msg.user { color: #0f172a; }
+    .msg.assistant { color: #0b3b8f; }
+    .msg .role { font-weight: 700; margin-right: 6px; }
     #log { white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; min-height: 260px; }
     .hint { color: #475569; font-size: 13px; }
   </style>
@@ -36,23 +42,54 @@
   <p class="hint">
     Stream events: <code>stream_delta</code> / <code>stream_end</code>. One-shot event: <code>message</code>.
   </p>
+  <p class="hint">
+    Tip: If your static server logs a <code>GET /favicon.ico 404</code>, you can ignore it.
+    It does not affect websocket chat.
+  </p>
 
+  <div id="chat"></div>
   <div id="log"></div>
 
   <script>
     let ws = null;
     const streamState = new Map(); // streamId -> accumulated text
+    const streamNodes = new Map(); // streamId -> DOM node
 
+    const chatEl = document.getElementById('chat');
     const logEl = document.getElementById('log');
     const wsUrlEl = document.getElementById('wsUrl');
     const tokenEl = document.getElementById('token');
     const senderEl = document.getElementById('senderId');
-    const chatEl = document.getElementById('chatId');
+    const chatIdEl = document.getElementById('chatId');
     const msgEl = document.getElementById('msg');
 
     function log(line) {
       logEl.textContent += line + "\n";
       logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function addMessage(role, text) {
+      const row = document.createElement('div');
+      row.className = `msg ${role}`;
+      row.innerHTML = `<span class="role">${role === 'user' ? '你' : '助手'}:</span><span class="text"></span>`;
+      row.querySelector('.text').textContent = text;
+      chatEl.appendChild(row);
+      chatEl.scrollTop = chatEl.scrollHeight;
+      return row;
+    }
+
+    function renderStream(streamId, text) {
+      let row = streamNodes.get(streamId);
+      if (!row) {
+        row = addMessage('assistant', '');
+        streamNodes.set(streamId, row);
+      }
+      row.querySelector('.text').textContent = text;
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function finishStream(streamId) {
+      streamNodes.delete(streamId);
     }
 
     function safeJsonParse(text) {
@@ -82,7 +119,7 @@
               type: 'auth',
               token,
               sender_id: senderEl.value.trim(),
-              chat_id: chatEl.value.trim(),
+              chat_id: chatIdEl.value.trim(),
             }));
           }
           return;
@@ -99,7 +136,8 @@
         }
 
         if (data.type === 'message') {
-          log(`[assistant][full] ${data.content || ''}`);
+          addMessage('assistant', data.content || '');
+          log('[assistant][full]');
           return;
         }
 
@@ -108,7 +146,7 @@
           const prev = streamState.get(streamId) || '';
           const next = prev + (data.delta || '');
           streamState.set(streamId, next);
-          log(`[assistant][stream:${streamId}] ${next}`);
+          renderStream(streamId, next);
           return;
         }
 
@@ -116,8 +154,12 @@
           const streamId = data?.metadata?._stream_id || 'default';
           const finalText = streamState.get(streamId) || '';
           const resuming = !!data?.metadata?._resuming;
-          log(`[assistant][end:${streamId}] resuming=${resuming} text=${finalText}`);
-          if (!resuming) streamState.delete(streamId);
+          renderStream(streamId, finalText);
+          log(`[assistant][end:${streamId}] resuming=${resuming}`);
+          if (!resuming) {
+            streamState.delete(streamId);
+            finishStream(streamId);
+          }
           return;
         }
 
@@ -146,11 +188,12 @@
       const payload = {
         type: 'message',
         sender_id: senderEl.value.trim() || 'web-user',
-        chat_id: chatEl.value.trim() || 'room-1',
+        chat_id: chatIdEl.value.trim() || 'room-1',
         content: msgEl.value,
       };
       ws.send(JSON.stringify(payload));
-      log('[you] ' + payload.content);
+      addMessage('user', payload.content);
+      log('[you] sent');
       msgEl.value = '';
     }
 
