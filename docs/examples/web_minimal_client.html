@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>nanobot web channel demo</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 20px; max-width: 900px; }
+    .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    input, button { padding: 8px; font-size: 14px; }
+    input { flex: 1; min-width: 180px; }
+    #log { white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; min-height: 260px; }
+    .hint { color: #475569; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>nanobot Web Channel — Minimal Client</h2>
+
+  <div class="row">
+    <input id="wsUrl" value="ws://127.0.0.1:8765/ws" />
+    <input id="token" placeholder="token (optional)" />
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn">Disconnect</button>
+  </div>
+
+  <div class="row">
+    <input id="senderId" value="web-user" />
+    <input id="chatId" value="room-1" />
+  </div>
+
+  <div class="row">
+    <input id="msg" placeholder="Type message..." />
+    <button id="sendBtn">Send</button>
+  </div>
+
+  <p class="hint">
+    Stream events: <code>stream_delta</code> / <code>stream_end</code>. One-shot event: <code>message</code>.
+  </p>
+
+  <div id="log"></div>
+
+  <script>
+    let ws = null;
+    const streamState = new Map(); // streamId -> accumulated text
+
+    const logEl = document.getElementById('log');
+    const wsUrlEl = document.getElementById('wsUrl');
+    const tokenEl = document.getElementById('token');
+    const senderEl = document.getElementById('senderId');
+    const chatEl = document.getElementById('chatId');
+    const msgEl = document.getElementById('msg');
+
+    function log(line) {
+      logEl.textContent += line + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function safeJsonParse(text) {
+      try { return JSON.parse(text); } catch { return null; }
+    }
+
+    function connect() {
+      if (ws && ws.readyState === WebSocket.OPEN) return;
+      ws = new WebSocket(wsUrlEl.value.trim());
+
+      ws.onopen = () => {
+        log('[system] connected');
+      };
+
+      ws.onmessage = (ev) => {
+        const data = safeJsonParse(ev.data);
+        if (!data) {
+          log('[raw] ' + ev.data);
+          return;
+        }
+
+        if (data.type === 'hello') {
+          log('[server] hello: ' + JSON.stringify(data.protocol || {}));
+          const token = tokenEl.value.trim();
+          if (data.requires_auth || token) {
+            ws.send(JSON.stringify({
+              type: 'auth',
+              token,
+              sender_id: senderEl.value.trim(),
+              chat_id: chatEl.value.trim(),
+            }));
+          }
+          return;
+        }
+
+        if (data.type === 'auth_ok') {
+          log('[server] auth_ok');
+          return;
+        }
+
+        if (data.type === 'error') {
+          log('[server:error] ' + JSON.stringify(data));
+          return;
+        }
+
+        if (data.type === 'message') {
+          log(`[assistant][full] ${data.content || ''}`);
+          return;
+        }
+
+        if (data.type === 'stream_delta') {
+          const streamId = data?.metadata?._stream_id || 'default';
+          const prev = streamState.get(streamId) || '';
+          const next = prev + (data.delta || '');
+          streamState.set(streamId, next);
+          log(`[assistant][stream:${streamId}] ${next}`);
+          return;
+        }
+
+        if (data.type === 'stream_end') {
+          const streamId = data?.metadata?._stream_id || 'default';
+          const finalText = streamState.get(streamId) || '';
+          const resuming = !!data?.metadata?._resuming;
+          log(`[assistant][end:${streamId}] resuming=${resuming} text=${finalText}`);
+          if (!resuming) streamState.delete(streamId);
+          return;
+        }
+
+        log('[server] ' + JSON.stringify(data));
+      };
+
+      ws.onerror = (ev) => {
+        log('[system:error] websocket error');
+      };
+
+      ws.onclose = (ev) => {
+        log(`[system] disconnected code=${ev.code} reason=${ev.reason || ''}`);
+      };
+    }
+
+    function disconnect() {
+      if (ws) ws.close();
+      ws = null;
+    }
+
+    function sendMessage() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log('[system] not connected');
+        return;
+      }
+      const payload = {
+        type: 'message',
+        sender_id: senderEl.value.trim() || 'web-user',
+        chat_id: chatEl.value.trim() || 'room-1',
+        content: msgEl.value,
+      };
+      ws.send(JSON.stringify(payload));
+      log('[you] ' + payload.content);
+      msgEl.value = '';
+    }
+
+    document.getElementById('connectBtn').onclick = connect;
+    document.getElementById('disconnectBtn').onclick = disconnect;
+    document.getElementById('sendBtn').onclick = sendMessage;
+    msgEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendMessage();
+    });
+  </script>
+</body>
+</html>
