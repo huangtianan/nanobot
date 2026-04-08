@@ -4,7 +4,7 @@ import json
 import pytest
 
 from nanobot.cron.service import CronService
-from nanobot.cron.types import CronSchedule
+from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 
 
 def test_add_job_rejects_unknown_timezone(tmp_path) -> None:
@@ -139,5 +139,72 @@ async def test_running_service_honors_external_disable(tmp_path) -> None:
 
         await asyncio.sleep(0.35)
         assert called == []
+    finally:
+        service.stop()
+
+
+def test_remove_job_refuses_system_jobs(tmp_path) -> None:
+    service = CronService(tmp_path / "cron" / "jobs.json")
+    service.register_system_job(CronJob(
+        id="dream",
+        name="dream",
+        schedule=CronSchedule(kind="cron", expr="0 */2 * * *", tz="UTC"),
+        payload=CronPayload(kind="system_event"),
+    ))
+
+    result = service.remove_job("dream")
+
+    assert result == "protected"
+    assert service.get_job("dream") is not None
+
+
+def test_reload_jobs(tmp_path):
+    store_path = tmp_path / "cron" / "jobs.json"
+    service = CronService(store_path, on_job=lambda _: asyncio.sleep(0))
+    service.add_job(
+        name="hist",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+    )
+
+    assert len(service.list_jobs()) == 1
+
+    service2 = CronService(tmp_path / "cron" / "jobs.json")
+    service2.add_job(
+        name="hist2",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello2",
+    )
+    assert len(service.list_jobs()) == 2
+
+
+@pytest.mark.asyncio
+async def test_running_service_picks_up_external_add(tmp_path):
+    """A running service should detect and execute a job added by another instance."""
+    store_path = tmp_path / "cron" / "jobs.json"
+    called: list[str] = []
+
+    async def on_job(job):
+        called.append(job.name)
+
+    service = CronService(store_path, on_job=on_job)
+    service.add_job(
+        name="heartbeat",
+        schedule=CronSchedule(kind="every", every_ms=150),
+        message="tick",
+    )
+    await service.start()
+    try:
+        await asyncio.sleep(0.05)
+
+        external = CronService(store_path)
+        external.add_job(
+            name="external",
+            schedule=CronSchedule(kind="every", every_ms=150),
+            message="ping",
+        )
+
+        await asyncio.sleep(0.6)
+        assert "external" in called
     finally:
         service.stop()
