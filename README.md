@@ -319,6 +319,8 @@ Server push events include:
 
 Minimal browser demo: [`docs/examples/web_minimal_client.html`](./docs/examples/web_minimal_client.html)
 
+> If you see `GET /favicon.ico 404` in `python -m http.server` logs, it is harmless and unrelated to websocket messaging.
+
 **2. Run**
 
 ```bash
