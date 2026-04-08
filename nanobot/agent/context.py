@@ -24,6 +24,11 @@ class ContextBuilder:
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        self._extra_guidelines: list[str] = []
+
+    def add_guideline(self, section: str) -> None:
+        """Append an extra guideline section to the system prompt."""
+        self._extra_guidelines.append(section)
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
@@ -51,6 +56,9 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
+
+        for guideline in self._extra_guidelines:
+            parts.append(guideline)
 
         return "\n\n---\n\n".join(parts)
 
@@ -108,6 +116,12 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         lines = [f"Current Time: {current_time_str(timezone)}"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+        # 提醒：数据相关问题优先使用 data_agent，并且不要在指令里臆造额外指标/维度。
+        # 这条提示会出现在每轮用户消息前，帮助模型减少对指令的过度扩展。
+        lines.append(
+            "data_agent提示：data_agent 的 instruction 只保留用户原话中与数据相关的部分，"
+            "不要为了\"更全面\"而额外添加合同额、收入、成本、利润、现金流、同比/环比、业务线拆分等用户没有明确说明的内容。"
+        )
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:

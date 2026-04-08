@@ -7,25 +7,116 @@
   <style>
     body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 20px; max-width: 900px; }
     .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .section { margin-bottom: 16px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; }
+    .section h3 { margin: 0 0 8px 0; font-size: 14px; color: #334155; }
     input, button { padding: 8px; font-size: 14px; }
     input { flex: 1; min-width: 180px; }
+    input[type="password"] { min-width: 140px; }
+    button { cursor: pointer; }
     #log { white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; min-height: 260px; }
     .hint { color: #475569; font-size: 13px; }
+    .status { font-size: 13px; margin-left: 8px; }
+    .status.ok { color: #16a34a; }
+    .status.fail { color: #dc2626; }
+    .llm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; align-items: center; }
+    .llm-grid label { font-size: 12px; color: #64748b; display: block; margin-bottom: 2px; }
+    .llm-grid input, .llm-grid select { width: 100%; min-width: 0; box-sizing: border-box; }
+    .llm-stream { display: flex; align-items: center; gap: 8px; font-size: 14px; }
   </style>
 </head>
 <body>
   <h2>nanobot Web Channel — Minimal Client</h2>
 
-  <div class="row">
-    <input id="wsUrl" value="ws://127.0.0.1:8765/ws" />
-    <input id="token" placeholder="token (optional)" />
-    <button id="connectBtn">Connect</button>
-    <button id="disconnectBtn">Disconnect</button>
+  <div class="section">
+    <h3>DataAgent — login or paste token</h3>
+    <p class="hint" style="margin-top:0">
+      <strong>Token 不持久化：</strong>刷新或重新打开本页后，输入框为空属正常，需要重新 Login 或粘贴 token（本示例不写 <code>sessionStorage</code>，避免误以为「没登录却已有 token」）。
+      <strong>Login:</strong> browser <code>POST</code> to your DataAgent auth URL; the returned token is filled below and sent as <code>metadata.auth_token</code> on each chat message
+      (nanobot then calls <code>new_session</code> / conversing with <code>Authorization: Bearer …</code>). If the auth server has no CORS for <code>file://</code> or your dev origin, serve this HTML from the same host or use a proxy.
+      <strong>Or</strong> paste a token manually. Optional: <code>tools.dataAgent.authToken</code> in <code>config.json</code> still applies when the field is empty.
+    </p>
+    <div class="row">
+      <input id="daLoginUrl" value="http://127.0.0.1:8002/api/v1/auth/login" placeholder="DataAgent login URL" autocomplete="off" />
+      <select id="daLoginBody" title="Request body shape">
+        <option value="json">Body: JSON {name, password}</option>
+        <option value="form">Body: form (name, password)</option>
+      </select>
+    </div>
+    <div class="row">
+      <input id="daUsername" placeholder="用户名 / name" autocomplete="username" />
+      <input id="daPassword" type="password" placeholder="password" autocomplete="current-password" />
+      <button id="daLoginBtn" type="button">Login &amp; set token</button>
+      <span id="daLoginStatus" class="status"></span>
+    </div>
+    <div class="row">
+      <input id="dataAgentToken" type="password" placeholder="DataAgent Bearer token (filled by login or paste)" autocomplete="off" />
+    </div>
+    <p class="hint" style="margin:8px 0 4px 0">每条消息会携带 <code>metadata.data_agent.llm_param</code>（仅发送非空字段；与 <code>config.json</code> 里 tools.dataAgent.llmParam 合并）。</p>
+    <div class="llm-grid">
+      <div>
+        <label for="llmModel">model</label>
+        <input id="llmModel" placeholder="e.g. gpt-4o" autocomplete="off" />
+      </div>
+      <div>
+        <label for="llmApiBase">api_base</label>
+        <input id="llmApiBase" placeholder="https://api.openai.com/v1" autocomplete="off" />
+      </div>
+      <div>
+        <label for="llmApiType">api_type</label>
+        <input id="llmApiType" placeholder="openai (默认可不填)" autocomplete="off" />
+      </div>
+      <div>
+        <label for="llmApiKey">api_key</label>
+        <input id="llmApiKey" type="password" placeholder="可选，仅本页会话" autocomplete="off" />
+      </div>
+      <div>
+        <label for="llmTemperature">temperature</label>
+        <input id="llmTemperature" type="number" step="0.1" placeholder="如 0.7" />
+      </div>
+      <div>
+        <label for="llmMaxTokens">max_tokens</label>
+        <input id="llmMaxTokens" type="number" step="1" min="0" placeholder="如 4096" />
+      </div>
+      <div>
+        <label for="llmMaxContextTokens">max_context_tokens</label>
+        <input id="llmMaxContextTokens" type="number" step="1" min="0" placeholder="可选" />
+      </div>
+      <div class="llm-stream" style="align-self:end;padding-bottom:4px;">
+        <input type="checkbox" id="llmStream" checked />
+        <label for="llmStream" style="margin:0;font-size:14px;color:#334155;">stream</label>
+      </div>
+    </div>
   </div>
 
-  <div class="row">
-    <input id="senderId" value="web-user" />
-    <input id="chatId" value="room-1" />
+  <div class="section">
+    <h3>WebSocket Connection</h3>
+    <p class="hint" style="margin-top:0">
+      <strong>WS token 必填</strong>：与下方 DataAgent 登录返回的 Bearer 为<strong>同一 token</strong> 时，登录成功会自动填入此处；也可手动粘贴。用于 nanobot Web 鉴权与 DataAgent 请求（服务端在 <code>auth</code> 后会复用此 token）。
+    </p>
+    <div class="row">
+      <input id="wsUrl" value="ws://127.0.0.1:8765/ws" />
+      <input id="token" type="password" placeholder="WS / 应用 token（必填）" autocomplete="off" required aria-required="true" />
+      <button id="connectBtn">Connect</button>
+      <button id="disconnectBtn">Disconnect</button>
+    </div>
+    <div class="row">
+      <input id="senderId" value="web-user" />
+      <input id="chatId" value="room-1" />
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>HTTP — New conversation</h3>
+    <p class="hint" style="margin-top:0">
+      Enable <code>httpApiEnabled</code> on the Web channel and set <code>httpApiPort</code> (default 8766).
+      POST clears nanobot session. If gateway <code>sessionAuthBaseUrl</code> is set, include <code>auth_token</code> in the JSON body (same as chat metadata) so the server clears <code>web:{userId}</code>; otherwise the legacy key <code>web:{chat_id}</code> is cleared.
+    </p>
+    <div class="row">
+      <input id="httpApiBase" value="http://127.0.0.1:8766" placeholder="HTTP API base (no trailing slash)" />
+      <button id="resetSessionBtn" type="button">Reset session (HTTP)</button>
+      <button id="newChatIdBtn" type="button">New chat ID (local)</button>
+      <span id="httpResetStatus" class="status"></span>
+    </div>
   </div>
 
   <div class="row">
@@ -35,13 +126,15 @@
 
   <p class="hint">
     Stream events: <code>stream_delta</code> / <code>stream_end</code>. One-shot event: <code>message</code>.
+    DataAgent: root <code>metadata.auth_token</code> or nested <code>metadata.data_agent</code> (e.g. <code>request_id</code>/<code>design_template_id</code> (or camelCase), <code>assistant</code>, <code>llm_param</code>) — merged over <code>config.json</code> for that turn only; omit <code>request_id</code> to use this room’s <code>chat_id</code>.
   </p>
 
   <div id="log"></div>
 
   <script>
     let ws = null;
-    const streamState = new Map(); // streamId -> accumulated text
+    const streamState = new Map();
+    const streamLineEl = new Map();
 
     const logEl = document.getElementById('log');
     const wsUrlEl = document.getElementById('wsUrl');
@@ -49,9 +142,57 @@
     const senderEl = document.getElementById('senderId');
     const chatEl = document.getElementById('chatId');
     const msgEl = document.getElementById('msg');
+    const dataAgentTokenEl = document.getElementById('dataAgentToken');
+    const daLoginUrlEl = document.getElementById('daLoginUrl');
+    const daLoginBodyEl = document.getElementById('daLoginBody');
+    const daUsernameEl = document.getElementById('daUsername');
+    const daPasswordEl = document.getElementById('daPassword');
+    const daLoginStatusEl = document.getElementById('daLoginStatus');
+    const httpApiBaseEl = document.getElementById('httpApiBase');
+    const httpResetStatusEl = document.getElementById('httpResetStatus');
+    const llmModelEl = document.getElementById('llmModel');
+    const llmApiBaseEl = document.getElementById('llmApiBase');
+    const llmApiTypeEl = document.getElementById('llmApiType');
+    const llmApiKeyEl = document.getElementById('llmApiKey');
+    const llmTemperatureEl = document.getElementById('llmTemperature');
+    const llmMaxTokensEl = document.getElementById('llmMaxTokens');
+    const llmMaxContextTokensEl = document.getElementById('llmMaxContextTokens');
+    const llmStreamEl = document.getElementById('llmStream');
+
+    function extractBearerFromLoginResponse(data) {
+      if (!data || typeof data !== 'object') return '';
+      const direct =
+        data.access_token ||
+        data.accessToken ||
+        data.token ||
+        data.bearer_token ||
+        data.bearerToken;
+      if (typeof direct === 'string' && direct.trim()) return direct.trim();
+      const d = data.data;
+      if (d && typeof d === 'object') {
+        const inner =
+          d.access_token || d.accessToken || d.token || d.bearer_token || d.bearerToken;
+        if (typeof inner === 'string' && inner.trim()) return inner.trim();
+      }
+      return '';
+    }
 
     function log(line) {
-      logEl.textContent += line + "\n";
+      const div = document.createElement('div');
+      div.textContent = line;
+      logEl.appendChild(div);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function upsertStreamLine(streamId, text) {
+      let el = streamLineEl.get(streamId);
+      if (!el) {
+        el = document.createElement('div');
+        el.dataset.streamId = streamId;
+        logEl.appendChild(el);
+        streamLineEl.set(streamId, el);
+      }
+      el.textContent = `[assistant][stream:${streamId}] ${text}`;
       logEl.scrollTop = logEl.scrollHeight;
     }
 
@@ -59,8 +200,16 @@
       try { return JSON.parse(text); } catch { return null; }
     }
 
+    // ── WebSocket ──
+
     function connect() {
       if (ws && ws.readyState === WebSocket.OPEN) return;
+      const wsToken = tokenEl.value.trim();
+      if (!wsToken) {
+        log('[system] 请先填写 WS token（可先完成上方 Login，或与 DataAgent 共用同一 token）');
+        tokenEl.focus();
+        return;
+      }
       ws = new WebSocket(wsUrlEl.value.trim());
 
       ws.onopen = () => {
@@ -76,14 +225,16 @@
 
         if (data.type === 'hello') {
           log('[server] hello: ' + JSON.stringify(data.protocol || {}));
-          const token = tokenEl.value.trim();
-          if (data.requires_auth || token) {
+          const wsToken = tokenEl.value.trim();
+          if (data.requires_auth || wsToken) {
             ws.send(JSON.stringify({
               type: 'auth',
-              token,
+              token: wsToken,
               sender_id: senderEl.value.trim(),
               chat_id: chatEl.value.trim(),
             }));
+          } else {
+            log('[system:error] hello 后未发送 auth：缺少 token');
           }
           return;
         }
@@ -108,7 +259,7 @@
           const prev = streamState.get(streamId) || '';
           const next = prev + (data.delta || '');
           streamState.set(streamId, next);
-          log(`[assistant][stream:${streamId}] ${next}`);
+          upsertStreamLine(streamId, next);
           return;
         }
 
@@ -116,15 +267,21 @@
           const streamId = data?.metadata?._stream_id || 'default';
           const finalText = streamState.get(streamId) || '';
           const resuming = !!data?.metadata?._resuming;
-          log(`[assistant][end:${streamId}] resuming=${resuming} text=${finalText}`);
-          if (!resuming) streamState.delete(streamId);
+          if (!resuming) {
+            streamState.delete(streamId);
+            const liveEl = streamLineEl.get(streamId);
+            if (liveEl) liveEl.remove();
+            streamLineEl.delete(streamId);
+          }
+          log(`[assistant][end:${streamId}] resuming=${resuming}`);
+          if (!resuming) log(`[assistant][full] ${finalText}`);
           return;
         }
 
         log('[server] ' + JSON.stringify(data));
       };
 
-      ws.onerror = (ev) => {
+      ws.onerror = () => {
         log('[system:error] websocket error');
       };
 
@@ -138,9 +295,130 @@
       ws = null;
     }
 
+    async function dataAgentLogin() {
+      const url = daLoginUrlEl.value.trim();
+      const u = daUsernameEl.value.trim();
+      const p = daPasswordEl.value;
+      daLoginStatusEl.textContent = '';
+      daLoginStatusEl.className = 'status';
+      if (!url) {
+        daLoginStatusEl.textContent = '填写登录 URL';
+        daLoginStatusEl.className = 'status fail';
+        return;
+      }
+      try {
+        let headers;
+        let body;
+        if (daLoginBodyEl.value === 'form') {
+          headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+          body = new URLSearchParams({ name: u, password: p });
+        } else {
+          headers = { 'Content-Type': 'application/json' };
+          body = JSON.stringify({ name: u, password: p });
+        }
+        const resp = await fetch(url, { method: 'POST', headers, body });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const msg =
+            (typeof data.detail === 'string' && data.detail) ||
+            (Array.isArray(data.detail) && data.detail.map((x) => x.msg || x).join('; ')) ||
+            data.message ||
+            data.error ||
+            `HTTP ${resp.status}`;
+          throw new Error(msg);
+        }
+        const tok = extractBearerFromLoginResponse(data);
+        if (!tok) {
+          throw new Error(
+            '响应里未找到 token（尝试字段 access_token / token / data.token 等），请改接口或用手动粘贴'
+          );
+        }
+        dataAgentTokenEl.value = tok;
+        tokenEl.value = tok;
+        daLoginStatusEl.textContent = '已写入 Bearer，并已填入 WS token';
+        daLoginStatusEl.className = 'status ok';
+        log('[data-agent] login ok, token set (WS + DataAgent)');
+      } catch (e) {
+        daLoginStatusEl.textContent = e.message;
+        daLoginStatusEl.className = 'status fail';
+        log(`[data-agent] login failed: ${e.message}`);
+      }
+    }
+
+    async function resetSessionHttp() {
+      const base = httpApiBaseEl.value.trim().replace(/\/$/, '');
+      const chatId = chatEl.value.trim() || 'room-1';
+      const wsToken = tokenEl.value.trim();
+      httpResetStatusEl.textContent = '';
+      httpResetStatusEl.className = 'status';
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (wsToken) headers['Authorization'] = `Bearer ${wsToken}`;
+        const body = { channel: 'web', chat_id: chatId };
+        const daTok = dataAgentTokenEl.value.trim();
+        if (daTok) body.auth_token = daTok;
+        const resp = await fetch(`${base}/api/session/reset`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        httpResetStatusEl.textContent = 'Session cleared';
+        httpResetStatusEl.className = 'status ok';
+        log(`[http] session reset ok key=${data.key || ''}`);
+      } catch (e) {
+        httpResetStatusEl.textContent = e.message;
+        httpResetStatusEl.className = 'status fail';
+        log(`[http] reset failed: ${e.message}`);
+      }
+    }
+
+    function newChatIdLocal() {
+      const id = (crypto.randomUUID && crypto.randomUUID()) || `room-${Date.now()}`;
+      chatEl.value = id;
+      streamState.clear();
+      streamLineEl.clear();
+      logEl.textContent = '';
+      log(`[ui] new chat_id=${id} (reconnect WebSocket if already connected)`);
+    }
+
+    function buildLlmParamFromForm() {
+      const lp = {};
+      const model = llmModelEl.value.trim();
+      const apiBase = llmApiBaseEl.value.trim();
+      const apiType = llmApiTypeEl.value.trim();
+      const apiKey = llmApiKeyEl.value.trim();
+      const tempStr = llmTemperatureEl.value.trim();
+      const maxTokStr = llmMaxTokensEl.value.trim();
+      const maxCtxStr = llmMaxContextTokensEl.value.trim();
+      if (model) lp.model = model;
+      if (apiBase) lp.api_base = apiBase;
+      if (apiType) lp.api_type = apiType;
+      if (apiKey) lp.api_key = apiKey;
+      if (tempStr !== '') {
+        const t = parseFloat(tempStr);
+        if (!Number.isNaN(t)) lp.temperature = t;
+      }
+      if (maxTokStr !== '') {
+        const n = parseInt(maxTokStr, 10);
+        if (!Number.isNaN(n)) lp.max_tokens = n;
+      }
+      if (maxCtxStr !== '') {
+        const n = parseInt(maxCtxStr, 10);
+        if (!Number.isNaN(n)) lp.max_context_tokens = n;
+      }
+      if (!llmStreamEl.checked) lp.stream = false;
+      return lp;
+    }
+
     function sendMessage() {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         log('[system] not connected');
+        return;
+      }
+      if (!tokenEl.value.trim()) {
+        log('[system] WS token 为空，请重新登录或填写 token 后再连');
         return;
       }
       const payload = {
@@ -149,11 +427,30 @@
         chat_id: chatEl.value.trim() || 'room-1',
         content: msgEl.value,
       };
+      const daTok = dataAgentTokenEl.value.trim();
+      const llm = buildLlmParamFromForm();
+      const metadata = {};
+      if (daTok) metadata.auth_token = daTok;
+      const dataAgent = {};
+      if (Object.keys(llm).length) dataAgent.llm_param = llm;
+      if (Object.keys(dataAgent).length) metadata.data_agent = dataAgent;
+      if (Object.keys(metadata).length) payload.metadata = metadata;
       ws.send(JSON.stringify(payload));
       log('[you] ' + payload.content);
       msgEl.value = '';
     }
 
+    document.getElementById('daLoginBtn').onclick = dataAgentLogin;
+    dataAgentTokenEl.addEventListener('change', () => {
+      const v = dataAgentTokenEl.value.trim();
+      if (v) tokenEl.value = v;
+    });
+    tokenEl.addEventListener('change', () => {
+      const v = tokenEl.value.trim();
+      if (v) dataAgentTokenEl.value = v;
+    });
+    document.getElementById('resetSessionBtn').onclick = resetSessionHttp;
+    document.getElementById('newChatIdBtn').onclick = newChatIdLocal;
     document.getElementById('connectBtn').onclick = connect;
     document.getElementById('disconnectBtn').onclick = disconnect;
     document.getElementById('sendBtn').onclick = sendMessage;

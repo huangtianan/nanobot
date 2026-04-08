@@ -17,12 +17,30 @@ class CronTool(Tool):
         self._default_timezone = default_timezone
         self._channel = ""
         self._chat_id = ""
+        self._created_by_user_id: str | None = None
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
-    def set_context(self, channel: str, chat_id: str) -> None:
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        session_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Set the current session context for delivery."""
         self._channel = channel
         self._chat_id = chat_id
+        self._created_by_user_id = None
+        md = metadata or {}
+        user_id = md.get("user_id") or md.get("userId")
+        if isinstance(user_id, str) and user_id.strip():
+            self._created_by_user_id = user_id.strip()
+            return
+        # Web sessions resolved by AgentLoop can use key format "web:{user_id}".
+        if channel == "web" and session_key and session_key.startswith("web:"):
+            maybe_uid = session_key.split(":", 1)[1].strip()
+            if maybe_uid:
+                self._created_by_user_id = maybe_uid
 
     def set_cron_context(self, active: bool):
         """Mark whether the tool is executing inside a cron job callback."""
@@ -174,6 +192,7 @@ class CronTool(Tool):
             deliver=True,
             channel=self._channel,
             to=self._chat_id,
+            created_by_user_id=self._created_by_user_id,
             delete_after_run=delete_after,
         )
         return f"Created job '{job.name}' (id: {job.id})"

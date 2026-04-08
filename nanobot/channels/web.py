@@ -31,6 +31,15 @@ class WebConfig(Base):
     token: str = ""
     allow_from: list[str] = Field(default_factory=list)
     streaming: bool = True
+    # REST API for browser actions (e.g. POST /api/session/reset) alongside WebSocket.
+    http_api_enabled: bool = False
+    http_api_port: int = 8766
+    # When set, session persistence uses ``web:{user_id}`` instead of ``web:{chat_id}``.
+    # AgentLoop resolves user_id by calling GET {session_auth_base_url}{session_auth_me_path}
+    # with the Bearer token from ``metadata.auth_token``.
+    session_auth_base_url: str = ""
+    session_auth_me_path: str = "/auth/users/me"
+    session_auth_timeout: float = 10.0
 
 
 @dataclass(eq=False)
@@ -41,6 +50,7 @@ class _ClientSession:
     sender_id: str | None = None
     chat_id: str | None = None
     authed: bool = False
+    auth_token: str | None = None
 
 
 class WebChannel(BaseChannel):
@@ -170,6 +180,15 @@ class WebChannel(BaseChannel):
         content = str(payload.get("content") or "").strip()
         media = payload.get("media") if isinstance(payload.get("media"), list) else []
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        # Connection-level Bearer (from auth) is used as default for downstream tools.
+        # Per-message metadata.auth_token/authToken has higher priority and can override it.
+        if client.auth_token and not (
+            isinstance(metadata.get("auth_token"), str) and metadata.get("auth_token").strip()
+        ) and not (
+            isinstance(metadata.get("authToken"), str) and metadata.get("authToken").strip()
+        ):
+            metadata = dict(metadata)
+            metadata["auth_token"] = client.auth_token
 
         if not content and not media:
             await self._safe_send(client.ws, {"type": "error", "error": "empty_message"})
@@ -194,6 +213,12 @@ class WebChannel(BaseChannel):
             await client.ws.close(code=4401, reason="Unauthorized")
             return
         client.authed = True
+        da_tok = payload.get("auth_token") or payload.get("authToken")
+        if isinstance(da_tok, str) and da_tok.strip():
+            client.auth_token = da_tok.strip()
+        elif token.strip():
+            # Single-token mode: reuse WS auth token for downstream requests by default.
+            client.auth_token = token.strip()
         if chat_id := payload.get("chat_id"):
             await self._bind_chat(client, str(chat_id))
         if sender_id := payload.get("sender_id"):

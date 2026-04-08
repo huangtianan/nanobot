@@ -21,6 +21,11 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.data_agent import (
+    DataAgentTool,
+    attach_data_agent_overlay_from_message,
+    detach_data_agent_overlay,
+)
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -33,7 +38,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, DataAgentConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -68,8 +73,9 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
+        data_agent_config: DataAgentConfig | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, WebSearchConfig
+        from nanobot.config.schema import DataAgentConfig, ExecToolConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -82,6 +88,7 @@ class AgentLoop:
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
+        self.data_agent_config = data_agent_config or DataAgentConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
@@ -102,6 +109,7 @@ class AgentLoop:
         )
 
         self._running = False
+        self._web_uid_cache: dict[str, tuple[str, float]] = {}  # token -> (user_id, expire_ts)
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
@@ -125,6 +133,7 @@ class AgentLoop:
             max_completion_tokens=provider.generation.max_tokens,
         )
         self._register_default_tools()
+        self._inject_tool_guidelines()
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
 
@@ -150,6 +159,37 @@ class AgentLoop:
             self.tools.register(
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
             )
+        if self.data_agent_config.enabled:
+            da_cfg = self.data_agent_config
+            self.tools.register(DataAgentTool(
+                send_callback=self.bus.publish_outbound,
+                base_url=da_cfg.base_url,
+                chat_path=da_cfg.chat_path,
+                timeout=da_cfg.timeout,
+                assistant=da_cfg.assistant,
+                llm_param=da_cfg.llm_param.model_dump(exclude_none=True) if da_cfg.llm_param else None,
+                xmetric_param=da_cfg.xmetric_param.model_dump(exclude_none=True) if da_cfg.xmetric_param else None,
+                auth_token=da_cfg.auth_token,
+                new_session_path=da_cfg.new_session_path,
+            ))
+
+    def _inject_tool_guidelines(self) -> None:
+        """Add tool-specific guidelines to the system prompt based on registered tools."""
+        if self.tools.get("data_agent"):
+            self.context.add_guideline(
+                "## 数据分析（data_agent）\n\n"
+                "已接入 `data_agent`，用于数据库/数据集上的分析、报表、图表，以及用户上传的 CSV、Excel 等。"
+                "凡是查数、统计、报表、看板、趋势、指标、对比等结构化数据需求，**必须**用 `data_agent`，"
+                "不要用本地 `read_file`/`list_dir`/`exec` 去找 CSV 代替。\n"
+                "**传参 instruction（核心）**："
+                "只摘录或原样复制用户话里「与本次查数/分析直接相关」的部分，**禁止**为显得「更完整」而追加"
+                "合同额、收入、成本、利润、现金流、同比、环比、业务线拆分等用户**没有明说**的内容；"
+                "具体有哪些字段与指标由 DataAgent 侧根据数据与模型自行决定。\n"
+                "用户在一句话里安排多件事时：**instruction 只保留数据相关子句**，其余用 `cron`、`message` 等其它工具完成。"
+                "示例：用户「分析去年10月经营情况，并设成定时任务」→ `data_agent(instruction='分析去年10月经营情况')`，定时任务另调用对应工具。\n"
+                "示例：用户只说「看下上月营收」→ instruction 保持简短，不要扩展成「营收、毛利、费用、同比…」长清单。\n"
+                "流式结果会直接展示给用户；你只收到工具返回的简短摘要，勿就同一需求重复调用 `data_agent`。"
+            )
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -173,12 +213,79 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    async def _resolve_web_session_key(self, msg: InboundMessage, fallback_key: str) -> str:
+        """For web channel: resolve user_id from auth_token → ``web:{user_id}``.
+
+        Uses ``channels.web.sessionAuthBaseUrl`` + ``sessionAuthMePath``.
+        Results are cached per token for 5 minutes to avoid hitting /me on every message.
+        Returns *fallback_key* if auth is not configured or resolution fails.
+        """
+        from nanobot.channels.web_session_auth import (
+            bearer_token_from_message_metadata,
+            resolve_web_session_user_id,
+            web_session_auth_settings,
+        )
+
+        web_cfg = getattr(self.channels_config, "web", None) if self.channels_config else None
+        auth_base, me_path, auth_timeout = web_session_auth_settings(web_cfg)
+        if not auth_base:
+            return fallback_key
+
+        tok = bearer_token_from_message_metadata(msg.metadata)
+        if not tok:
+            return fallback_key
+
+        now = time.time()
+        cached = self._web_uid_cache.get(tok)
+        if cached:
+            uid, expires = cached
+            if now < expires:
+                return f"web:{uid}"
+
+        uid = await resolve_web_session_user_id(
+            base_url=auth_base,
+            me_path=me_path,
+            bearer_token=tok,
+            timeout=auth_timeout,
+        )
+        if uid:
+            self._web_uid_cache[tok] = (uid, now + 300)
+            return f"web:{uid}"
+
+        if cached:
+            return f"web:{cached[0]}"
+
+        return fallback_key
+
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        *,
+        session_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron"):
+        for name in ("message", "spawn", "cron", "data_agent"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                    if name == "message":
+                        tool.set_context(channel, chat_id, message_id)
+                    elif name == "cron":
+                        tool.set_context(channel, chat_id, session_key, metadata)
+                    else:
+                        tool.set_context(channel, chat_id)
+
+    def _set_data_agent_user_message(self, message: str) -> None:
+        if da := self.tools.get("data_agent"):
+            if isinstance(da, DataAgentTool):
+                da.set_user_message(message)
+
+    def _clear_data_agent_user_message(self) -> None:
+        if da := self.tools.get("data_agent"):
+            if isinstance(da, DataAgentTool):
+                da.clear_user_message()
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -209,6 +316,8 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        session_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -252,7 +361,13 @@ class AgentLoop:
                 for tc in context.tool_calls:
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tc.name, args_str[:200])
-                loop_self._set_tool_context(channel, chat_id, message_id)
+                loop_self._set_tool_context(
+                    channel,
+                    chat_id,
+                    message_id,
+                    session_key=session_key,
+                    metadata=metadata,
+                )
 
             def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
                 return loop_self._strip_think(content)
@@ -403,7 +518,13 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(
+                channel,
+                chat_id,
+                msg.metadata.get("message_id"),
+                session_key=key,
+                metadata=msg.metadata,
+            )
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
@@ -411,10 +532,18 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(
-                messages, channel=channel, chat_id=chat_id,
-                message_id=msg.metadata.get("message_id"),
-            )
+            attach_data_agent_overlay_from_message(msg.metadata)
+            self._set_data_agent_user_message(msg.content)
+            try:
+                final_content, _, all_msgs = await self._run_agent_loop(
+                    messages, channel=channel, chat_id=chat_id,
+                    message_id=msg.metadata.get("message_id"),
+                    session_key=key,
+                    metadata=msg.metadata,
+                )
+            finally:
+                detach_data_agent_overlay()
+                self._clear_data_agent_user_message()
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
@@ -425,6 +554,8 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
+        if msg.channel == "web":
+            key = await self._resolve_web_session_key(msg, key)
         session = self.sessions.get_or_create(key)
 
         # Slash commands
@@ -435,7 +566,13 @@ class AgentLoop:
 
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(
+            msg.channel,
+            msg.chat_id,
+            msg.metadata.get("message_id"),
+            session_key=key,
+            metadata=msg.metadata,
+        )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -456,14 +593,22 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages,
-            on_progress=on_progress or _bus_progress,
-            on_stream=on_stream,
-            on_stream_end=on_stream_end,
-            channel=msg.channel, chat_id=msg.chat_id,
-            message_id=msg.metadata.get("message_id"),
-        )
+        attach_data_agent_overlay_from_message(msg.metadata)
+        self._set_data_agent_user_message(msg.content)
+        try:
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial_messages,
+                on_progress=on_progress or _bus_progress,
+                on_stream=on_stream,
+                on_stream_end=on_stream_end,
+                channel=msg.channel, chat_id=msg.chat_id,
+                message_id=msg.metadata.get("message_id"),
+                session_key=key,
+                metadata=msg.metadata,
+            )
+        finally:
+            detach_data_agent_overlay()
+            self._clear_data_agent_user_message()
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
@@ -571,13 +716,20 @@ class AgentLoop:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        metadata: dict[str, Any] | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+        msg = InboundMessage(
+            channel=channel,
+            sender_id="user",
+            chat_id=chat_id,
+            content=content,
+            metadata=metadata or {},
+        )
         return await self._process_message(
             msg, session_key=session_key, on_progress=on_progress,
             on_stream=on_stream, on_stream_end=on_stream_end,

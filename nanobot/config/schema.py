@@ -141,11 +141,49 @@ class MCPServerConfig(Base):
     tool_timeout: int = 30  # seconds before a tool call is cancelled
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
 
+class DataAgentLLMParam(Base):
+    """LLM parameters forwarded to DataAgent (mirrors DataAgent's LLMParam)."""
+
+    api_base: str = ""
+    api_key: str | None = None
+    model: str = ""
+    api_type: str = "openai"
+    temperature: float | None = None
+    max_tokens: int | None = None
+    max_context_tokens: int | None = None
+    stream: bool | None = True
+
+
+class DataAgentXmetricParam(Base):
+    """Xmetric parameters forwarded to DataAgent."""
+
+    xmetric_api_base_url: str | None = None
+    xmetric_api_endpoint: str | None = None
+    xmetric_parquet_endpoint: str | None = None
+    xmetric_api_timeout: int | None = None
+
+
+class DataAgentConfig(Base):
+    """DataAgent integration configuration."""
+
+    enabled: bool = False
+    base_url: str = "http://localhost:8002"
+    chat_path: str = "/api/v1/agent/query/conversing"
+    new_session_path: str = "/api/v1/agent/query/new_session"
+    auth_token: str = ""  # Bearer token for DataAgent (new_session + conversing)
+    token_exchange_url: str = "/api/v1/auth/auth/login"  # Optional endpoint to mint short-lived DataAgent token by user id
+    timeout: int = 120
+    assistant: str = ""
+    llm_param: DataAgentLLMParam | None = None
+    xmetric_param: DataAgentXmetricParam | None = None
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    data_agent: DataAgentConfig = Field(default_factory=DataAgentConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 

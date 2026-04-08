@@ -11,7 +11,8 @@ from loguru import logger
 if TYPE_CHECKING:
     from nanobot.channels.base import BaseChannel
 
-_INTERNAL = frozenset({"base", "manager", "registry"})
+# Package scaffolding and helpers that live under ``channels`` but are not ``BaseChannel`` plugins.
+_INTERNAL = frozenset({"base", "manager", "registry", "web_http_api"})
 
 
 def discover_channel_names() -> list[str]:

@@ -22,6 +22,7 @@ if sys.platform == "win32":
             pass
 
 import typer
+from loguru import logger
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import ANSI, HTML
@@ -550,9 +551,38 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        data_agent_config=config.tools.data_agent,
     )
 
     # Set cron callback (needs agent)
+    async def _fetch_job_runner_auth_token() -> str | None:
+        da_cfg = config.tools.data_agent
+        url = (da_cfg.token_exchange_url or "").strip()
+        if not url:
+            return None
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("Cron job_runner auth token fetch skipped: httpx not installed")
+            return None
+
+        try:
+            with httpx.Client(timeout=30.0) as client:  
+                login_response = client.post(f"{da_cfg.base_url}{da_cfg.token_exchange_url}", json={
+        "name": "admin",
+        "password": "admin123"
+    })
+                if login_response.status_code == 200:       
+                    login_result = login_response.json()
+                    admin_token = login_result["data"]["access_token"]
+                    return admin_token
+                else:
+                    print(f"登录失败: {login_response.status_code} - {login_response.text}")
+                    return None
+        except Exception as e:
+            print(f"登录过程中发生错误: {e}")
+        return None
+
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         from nanobot.agent.tools.cron import CronTool
@@ -569,12 +599,20 @@ def gateway(
         cron_token = None
         if isinstance(cron_tool, CronTool):
             cron_token = cron_tool.set_cron_context(True)
+        request_metadata: dict[str, Any] = {}
+        created_by_uid = (job.payload.created_by_user_id or "").strip()
+        if created_by_uid:
+            request_metadata["user_id"] = created_by_uid
+        minted = await _fetch_job_runner_auth_token()
+        if minted:
+            request_metadata["auth_token"] = minted
         try:
             resp = await agent.process_direct(
                 reminder_note,
                 session_key=f"cron:{job.id}",
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
+                metadata=request_metadata,
             )
         finally:
             if isinstance(cron_tool, CronTool) and cron_token is not None:
@@ -674,14 +712,36 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
+    from nanobot.channels.web_http_api import run_web_http_api_server, web_http_listen_config
+
+    _http_on, _http_host, _http_port, _http_token = web_http_listen_config(config)
+    if _http_on:
+        console.print(
+            f"[green]✓[/green] Web HTTP API: POST http://{_http_host}:{_http_port}/api/session/reset"
+        )
+
     async def run():
         try:
             await cron.start()
             await heartbeat.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            tasks: list = [
+                asyncio.create_task(agent.run()),
+                asyncio.create_task(channels.start_all()),
+            ]
+            if _http_on:
+                tasks.append(
+                    asyncio.create_task(
+                        run_web_http_api_server(
+                            host=_http_host,
+                            port=_http_port,
+                            token=_http_token,
+                            session_manager=session_manager,
+                            agent=agent,
+                            web_channel_config=getattr(config.channels, "web", None),
+                        )
+                    )
+                )
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         except Exception:
@@ -755,6 +815,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        data_agent_config=config.tools.data_agent,
     )
 
     # Shared reference for progress callbacks
